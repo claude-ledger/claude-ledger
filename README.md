@@ -1,5 +1,9 @@
 # claude-ledger
 
+[![PyPI version](https://img.shields.io/pypi/v/claude-ledger)](https://pypi.org/project/claude-ledger/)
+[![Python 3.10+](https://img.shields.io/pypi/pyversions/claude-ledger)](https://pypi.org/project/claude-ledger/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Portfolio-level project tracking for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 ## Why This Exists
