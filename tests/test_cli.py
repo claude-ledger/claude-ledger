@@ -5,7 +5,7 @@ import json
 import pytest
 from click.testing import CliRunner
 
-from claude_ledger.cli import cli
+from claude_ledger.cli import _build_hooks_spec, cli
 
 
 @pytest.fixture
@@ -178,3 +178,35 @@ class TestUninstall:
         session_hooks = updated["hooks"]["SessionStart"]
         assert len(session_hooks) == 1
         assert "some-other-tool" in session_hooks[0]["hooks"][0]["command"]
+
+
+class TestBuildHooksSpec:
+    def test_builds_four_hook_types(self):
+        spec = _build_hooks_spec("/usr/local/bin/claude-ledger")
+        assert "PostToolUse" in spec
+        assert "Stop" in spec
+        assert "SessionEnd" in spec
+        assert "SessionStart" in spec
+
+    def test_uses_cli_path_in_commands(self):
+        spec = _build_hooks_spec("/custom/path/claude-ledger")
+        for entries in spec.values():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    assert hook["command"].startswith("/custom/path/claude-ledger")
+
+    def test_python_m_path_works(self):
+        spec = _build_hooks_spec("python3 -m claude_ledger")
+        commands = []
+        for entries in spec.values():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    commands.append(hook["command"])
+        assert any("capture --touch" in c for c in commands)
+        assert any("briefing" in c for c in commands)
+
+    def test_matchers_are_correct(self):
+        spec = _build_hooks_spec("claude-ledger")
+        post_tool_matchers = [e["matcher"] for e in spec["PostToolUse"]]
+        assert "Edit|Write|MultiEdit" in post_tool_matchers
+        assert "Bash" in post_tool_matchers

@@ -8,9 +8,13 @@ import frontmatter
 from claude_ledger.capture import (
     _append_activity,
     _get_session_state,
+    _insert_bullet_into_content,
+    _is_safe_path_component,
+    _resolve_project_from_cwd,
     _resolve_project_from_path,
     _save_session_state,
     _touch_project,
+    handle_commit,
     handle_session_end,
     handle_stop_note,
     handle_touch,
@@ -225,3 +229,102 @@ class TestRebuildDirectoryIndex:
             index = json.load(f)
         assert "/tmp/test-project" in index
         assert index["/tmp/test-project"] == "test-project"
+
+
+class TestSafePathComponent:
+    def test_normal_session_id(self):
+        assert _is_safe_path_component("abc-123_def.456") is True
+
+    def test_rejects_traversal(self):
+        assert _is_safe_path_component("../../etc/passwd") is False
+
+    def test_rejects_empty(self):
+        assert _is_safe_path_component("") is False
+
+    def test_rejects_slash(self):
+        assert _is_safe_path_component("foo/bar") is False
+
+    def test_rejects_dotdot_in_middle(self):
+        assert _is_safe_path_component("foo..bar") is False
+
+
+class TestInsertBulletIntoContent:
+    def test_inserts_under_existing_heading(self):
+        content = "## Activity Log\n\n### 22 March 2026\n- Existing entry\n"
+        result = _insert_bullet_into_content(content, "### 22 March 2026", "- New entry")
+        assert "- New entry" in result
+        assert "- Existing entry" in result
+        # New entry should come after existing
+        assert result.index("- Existing entry") < result.index("- New entry")
+
+    def test_creates_heading_under_activity_log(self):
+        content = "## Activity Log\n\nSome old content.\n"
+        result = _insert_bullet_into_content(content, "### 22 March 2026", "- First entry")
+        assert "### 22 March 2026" in result
+        assert "- First entry" in result
+
+    def test_prepends_when_no_activity_log(self):
+        content = "Just some text."
+        result = _insert_bullet_into_content(content, "### 22 March 2026", "- Entry")
+        assert result.startswith("## Activity Log")
+        assert "- Entry" in result
+
+
+class TestResolveProjectFromCwd:
+    def test_resolves_known_cwd(self, tmp_ledger, sample_ledger_file):
+        # Build a directory index for fast lookup
+        rebuild_directory_index(tmp_ledger)
+        slug, directory = _resolve_project_from_cwd("/tmp/test-project", tmp_ledger)
+        assert slug == "test-project"
+        assert directory == "/tmp/test-project"
+
+    def test_returns_none_for_unknown(self, tmp_ledger):
+        slug, directory = _resolve_project_from_cwd("/unknown/path", tmp_ledger)
+        assert slug is None
+
+    def test_returns_none_for_empty(self, tmp_ledger):
+        slug, directory = _resolve_project_from_cwd("", tmp_ledger)
+        assert slug is None
+
+    def test_ignores_home_dir(self, tmp_ledger):
+        from pathlib import Path
+        home = str(Path.home())
+        slug, directory = _resolve_project_from_cwd(home, tmp_ledger)
+        assert slug is None
+
+
+class TestHandleCommit:
+    def test_ignores_non_commit_commands(self, tmp_ledger, sample_ledger_file):
+        hook_data = {
+            "session_id": "sess-commit",
+            "cwd": "/tmp/test-project",
+            "tool_input": {"command": "git status"},
+        }
+        handle_commit(hook_data, tmp_ledger)
+        config = load_config(tmp_ledger)
+        state = _get_session_state("sess-commit", config.state_dir)
+        # Should not have any commits recorded
+        proj = state.get("projects", {}).get("test-project", {})
+        assert proj.get("commits", []) == []
+
+    def test_ignores_missing_session_id(self, tmp_ledger):
+        hook_data = {
+            "cwd": "/tmp/test-project",
+            "tool_input": {"command": "git commit -m 'test'"},
+        }
+        handle_commit(hook_data, tmp_ledger)  # Should not raise
+
+    def test_ignores_failed_commit(self, tmp_ledger, sample_ledger_file):
+        # Build index so cwd resolves
+        rebuild_directory_index(tmp_ledger)
+        hook_data = {
+            "session_id": "sess-commit-fail",
+            "cwd": "/tmp/test-project",
+            "tool_input": {"command": "git commit -m 'test'"},
+            "tool_response": {"stdout": "nothing to commit"},
+        }
+        handle_commit(hook_data, tmp_ledger)
+        config = load_config(tmp_ledger)
+        state = _get_session_state("sess-commit-fail", config.state_dir)
+        proj = state.get("projects", {}).get("test-project", {})
+        assert proj.get("commits", []) == []

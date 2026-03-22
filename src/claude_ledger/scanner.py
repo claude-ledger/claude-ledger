@@ -89,8 +89,9 @@ def scan_git_metadata(project_dir: Path) -> dict[str, Any]:
     branch_count = int(branch_count_str) if branch_count_str.isdigit() else 0
 
     # --- Batch 2: recent commits (includes the -1 data we need) ---
+    # Use NUL (%x00) as field delimiter — commit subjects can contain pipes.
     recent_raw = _run_cmd(
-        ["git", "log", "-10", "--format=%h|%s|%cI"],
+        ["git", "log", "-10", "--format=%h%x00%s%x00%cI"],
         cwd=d,
     )
     last_date = None
@@ -98,7 +99,7 @@ def scan_git_metadata(project_dir: Path) -> dict[str, Any]:
     recent_commits: list[dict[str, str]] = []
     if recent_raw:
         for line in recent_raw.splitlines():
-            line_parts = line.split("|", 2)
+            line_parts = line.split("\0", 2)
             if len(line_parts) >= 3:
                 recent_commits.append({
                     "sha": line_parts[0],
@@ -370,11 +371,18 @@ def scan_local_directory(project_dir: Path, github_user: str | None = None) -> d
     }
 
 
+_SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
 def scan_github_repos(github_user: str) -> list[dict[str, Any]]:
     """List all repos on GitHub for the user. Requires gh CLI."""
+    if not _SAFE_IDENTIFIER_RE.match(github_user):
+        return []
     raw = _run_cmd(
-        f"gh repo list {github_user} --limit 100 "
-        f"--json name,description,pushedAt,isArchived,isEmpty,url,defaultBranchRef",
+        [
+            "gh", "repo", "list", github_user, "--limit", "100",
+            "--json", "name,description,pushedAt,isArchived,isEmpty,url,defaultBranchRef",
+        ],
         timeout=60,
     )
     if not raw:
@@ -535,7 +543,7 @@ def scan_portfolio(config: Config, log_fn: Any = None) -> ScanResults:
 
 
 def save_scan_results(results: ScanResults, path: Path) -> None:
-    """Write scan results to JSON file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(results.to_dict(), f, indent=2, default=str)
+    """Write scan results to JSON file (atomic)."""
+    from claude_ledger.utils import atomic_write_json
+
+    atomic_write_json(path, results.to_dict())

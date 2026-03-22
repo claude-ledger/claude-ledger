@@ -181,6 +181,7 @@ def save_ledger_file(path: Path, post: frontmatter.Post) -> None:
 def log_error(errors_log: Path, msg: str) -> None:
     """Append an error message to the errors log."""
     try:
+        errors_log.parent.mkdir(parents=True, exist_ok=True)
         with open(errors_log, "a") as f:
             f.write(f"[{datetime.now().isoformat()}] {msg}\n")
     except OSError:

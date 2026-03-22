@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-ledger"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Portfolio-level project tracking for Claude Code"
 readme = "README.md"
 license = "MIT"
@@ -46,6 +46,9 @@ claude-ledger = "claude_ledger.cli:cli"
 Homepage = "https://github.com/claude-ledger/claude-ledger"
 Repository = "https://github.com/claude-ledger/claude-ledger"
 Issues = "https://github.com/claude-ledger/claude-ledger/issues"
+
+[tool.hatch.version]
+path = "src/claude_ledger/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claude_ledger"]

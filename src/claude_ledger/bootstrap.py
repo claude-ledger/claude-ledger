@@ -11,7 +11,7 @@ from typing import Any
 import frontmatter
 
 from claude_ledger.config import Config
-from claude_ledger.utils import days_since, format_date_heading
+from claude_ledger.utils import atomic_write_frontmatter, days_since, format_date_heading
 
 
 def infer_status(scan_data: dict[str, Any]) -> str:
@@ -231,6 +231,11 @@ def create_ledger_file(
     if not slug:
         return None, "no slug"
 
+    # Guard against path traversal via crafted slugs
+    ledger_path = (config.ledger_dir / f"{slug}.md").resolve()
+    if not str(ledger_path).startswith(str(config.ledger_dir.resolve())):
+        return None, "skipped (path traversal detected)"
+
     if slug in config.skip_slugs:
         return None, "skipped (in skip_slugs)"
 
@@ -242,7 +247,6 @@ def create_ledger_file(
         return None, "skipped (third-party clone)"
 
     # Idempotent: don't overwrite existing ledger files
-    ledger_path = config.ledger_dir / f"{slug}.md"
     if ledger_path.exists():
         return None, "skipped (ledger file already exists)"
 
@@ -277,10 +281,8 @@ def create_ledger_file(
     post = frontmatter.Post(activity_log)
     post.metadata = metadata
 
-    # Write
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(ledger_path, "w") as f:
-        f.write(frontmatter.dumps(post))
+    # Write (atomic)
+    atomic_write_frontmatter(ledger_path, post)
 
     return slug, "created"
 

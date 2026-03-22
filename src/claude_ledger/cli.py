@@ -83,22 +83,11 @@ def _resolve_cli_path() -> str:
 
 def _build_hooks_spec(cli_path: str) -> dict:
     """Build the hooks spec using the resolved CLI path."""
-    # Determine if we're using 'python -m' style or direct binary
-    if " -m " in cli_path:
-        capture_cmd = f"{cli_path}.capture"  # python3 -m claude_ledger.capture
-        briefing_cmd = f"{cli_path}.briefing"
-        # Actually, use the CLI subcommand approach
-        capture_touch = f"{cli_path} capture --touch"
-        capture_commit = f"{cli_path} capture --commit"
-        capture_stop = f"{cli_path} capture --stop-note"
-        capture_end = f"{cli_path} capture --session-end"
-        briefing = f"{cli_path} briefing"
-    else:
-        capture_touch = f"{cli_path} capture --touch"
-        capture_commit = f"{cli_path} capture --commit"
-        capture_stop = f"{cli_path} capture --stop-note"
-        capture_end = f"{cli_path} capture --session-end"
-        briefing = f"{cli_path} briefing"
+    capture_touch = f"{cli_path} capture --touch"
+    capture_commit = f"{cli_path} capture --commit"
+    capture_stop = f"{cli_path} capture --stop-note"
+    capture_end = f"{cli_path} capture --session-end"
+    briefing = f"{cli_path} briefing"
 
     return {
         "PostToolUse": [

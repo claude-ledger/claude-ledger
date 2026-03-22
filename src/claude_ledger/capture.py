@@ -26,6 +26,14 @@ from typing import Any
 import frontmatter
 
 from claude_ledger.config import DEFAULT_LEDGER_DIR, load_config
+
+# Session IDs and slugs used in file paths must match this pattern.
+_SAFE_PATH_COMPONENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def _is_safe_path_component(value: str) -> bool:
+    """Validate that a value is safe to use in file path construction."""
+    return bool(value and _SAFE_PATH_COMPONENT_RE.match(value) and ".." not in value)
 from claude_ledger.utils import (
     acquire_lock,
     atomic_write_frontmatter,
@@ -43,7 +51,7 @@ def _read_stdin() -> dict[str, Any]:
             data = sys.stdin.read()
             if data.strip():
                 return json.loads(data)
-    except (json.JSONDecodeError, Exception):
+    except Exception:
         pass
     return {}
 
@@ -127,6 +135,8 @@ def _resolve_project_from_cwd(cwd: str, ledger_dir: Path) -> tuple[str | None, s
 
 def _get_session_state(session_id: str, state_dir: Path) -> dict[str, Any]:
     """Load session state file."""
+    if not _is_safe_path_component(session_id):
+        return {"session_id": session_id, "started_at": "", "updated_at": "", "projects": {}}
     state_path = state_dir / f"{session_id}.json"
     if state_path.exists():
         try:
@@ -146,6 +156,8 @@ def _save_session_state(
     session_id: str, state: dict[str, Any], state_dir: Path, locks_dir: Path
 ) -> None:
     """Save session state file."""
+    if not _is_safe_path_component(session_id):
+        return
     state_dir.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
     state_path = state_dir / f"{session_id}.json"
@@ -194,39 +206,8 @@ def _append_activity(slug: str, bullet: str, ledger_dir: Path, locks_dir: Path) 
 
     try:
         post = frontmatter.load(ledger_path)
-        today = format_date_heading()
-        heading = f"### {today}"
-        content = post.content or ""
-
-        if heading in content:
-            lines = content.split("\n")
-            insert_idx = None
-            for i, line in enumerate(lines):
-                if line.strip() == heading:
-                    insert_idx = i + 1
-                    while insert_idx < len(lines):
-                        next_line = lines[insert_idx].strip()
-                        if next_line.startswith("### ") or (
-                            next_line == ""
-                            and insert_idx + 1 < len(lines)
-                            and lines[insert_idx + 1].strip().startswith("### ")
-                        ):
-                            break
-                        insert_idx += 1
-                    break
-
-            if insert_idx is not None:
-                lines.insert(insert_idx, bullet)
-                post.content = "\n".join(lines)
-        else:
-            if "## Activity Log" in content:
-                content = content.replace(
-                    "## Activity Log\n",
-                    f"## Activity Log\n\n{heading}\n{bullet}\n",
-                )
-                post.content = content
-            else:
-                post.content = f"## Activity Log\n\n{heading}\n{bullet}\n" + content
+        heading = f"### {format_date_heading()}"
+        post.content = _insert_bullet_into_content(post.content or "", heading, bullet)
 
         post.metadata["last_session"] = datetime.now(timezone.utc).isoformat()
         post.metadata["last_activity"] = bullet.lstrip("- ").strip()[:120]
@@ -237,6 +218,36 @@ def _append_activity(slug: str, bullet: str, ledger_dir: Path, locks_dir: Path) 
         return False
     finally:
         release_lock(fd)
+
+
+def _insert_bullet_into_content(content: str, heading: str, bullet: str) -> str:
+    """Insert a bullet under a date heading using line-based logic.
+
+    If the heading exists, appends the bullet after existing entries under it.
+    If not, creates the heading under ``## Activity Log`` (or prepends it).
+    """
+    if heading in content:
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            if line.strip() == heading:
+                insert_idx = i + 1
+                while insert_idx < len(lines):
+                    next_line = lines[insert_idx].strip()
+                    if next_line.startswith("### ") or (
+                        next_line == ""
+                        and insert_idx + 1 < len(lines)
+                        and lines[insert_idx + 1].strip().startswith("### ")
+                    ):
+                        break
+                    insert_idx += 1
+                lines.insert(insert_idx, bullet)
+                return "\n".join(lines)
+    elif "## Activity Log" in content:
+        return content.replace(
+            "## Activity Log\n",
+            f"## Activity Log\n\n{heading}\n{bullet}\n",
+        )
+    return f"## Activity Log\n\n{heading}\n{bullet}\n" + content
 
 
 # === MODE HANDLERS ===
@@ -283,16 +294,16 @@ def handle_commit(hook_data: dict[str, Any], ledger_dir: Path) -> None:
     if not re.search(r"\[.+\s+[a-f0-9]+\]", stdout):
         return
 
-    # Capture commit metadata
+    # Capture commit metadata (NUL delimiter — subjects can contain pipes)
     try:
         result = subprocess.run(
-            'git log -1 --format="%h|%s|%cI"',
-            shell=True, capture_output=True, text=True,
+            ["git", "log", "-1", "--format=%h%x00%s%x00%cI"],
+            capture_output=True, text=True,
             cwd=directory or cwd, timeout=5,
         )
         if result.returncode != 0:
             return
-        parts = result.stdout.strip().split("|", 2)
+        parts = result.stdout.strip().split("\0", 2)
         if len(parts) < 3:
             return
         sha, subject, commit_time = parts
@@ -409,38 +420,24 @@ def handle_session_end(hook_data: dict[str, Any], ledger_dir: Path) -> None:
         try:
             post = frontmatter.load(ledger_path)
 
+            heading = f"### {format_date_heading()}"
+
             # Replay uncaptured commits
             for c in proj_data.get("commits", []):
                 if not c.get("captured_to_ledger"):
                     bullet = f"- {c['subject']} ({c['sha']})"
-                    today = format_date_heading()
-                    heading = f"### {today}"
-                    content = post.content or ""
-                    if heading in content:
-                        content = content.replace(heading, f"{heading}\n{bullet}")
-                    elif "## Activity Log" in content:
-                        content = content.replace(
-                            "## Activity Log\n",
-                            f"## Activity Log\n\n{heading}\n{bullet}\n",
-                        )
-                    post.content = content
+                    post.content = _insert_bullet_into_content(
+                        post.content or "", heading, bullet,
+                    )
 
             # Write session summary for commit-free projects
             commits = proj_data.get("commits", [])
             summary = proj_data.get("latest_stop_summary")
             if not commits and summary:
                 bullet = f"- [Session] {summary[:120]}"
-                today = format_date_heading()
-                heading = f"### {today}"
-                content = post.content or ""
-                if heading in content:
-                    content = content.replace(heading, f"{heading}\n{bullet}")
-                elif "## Activity Log" in content:
-                    content = content.replace(
-                        "## Activity Log\n",
-                        f"## Activity Log\n\n{heading}\n{bullet}\n",
-                    )
-                post.content = content
+                post.content = _insert_bullet_into_content(
+                    post.content or "", heading, bullet,
+                )
 
             post.metadata["last_session"] = datetime.now(timezone.utc).isoformat()
             if summary:
@@ -480,6 +477,8 @@ def _commit_ledger_repo(ledger_dir: Path) -> None:
 
 def _cleanup_session(session_id: str, state_dir: Path) -> None:
     """Delete session state file after successful finalisation."""
+    if not _is_safe_path_component(session_id):
+        return
     state_path = state_dir / f"{session_id}.json"
     try:
         state_path.unlink(missing_ok=True)
