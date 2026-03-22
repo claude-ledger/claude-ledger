@@ -41,61 +41,122 @@ def _load_config(ctx: click.Context):
 # --- init ---
 
 
-HOOKS_SPEC = {
-    "PostToolUse": [
-        {
-            "matcher": "Edit|Write|MultiEdit",
-            "hooks": [{
-                "type": "command",
-                "command": "claude-ledger capture --touch",
-                "timeout": 2,
-            }],
-        },
-        {
-            "matcher": "Bash",
-            "hooks": [{
-                "type": "command",
-                "command": "claude-ledger capture --commit",
-                "timeout": 3,
-            }],
-        },
-    ],
-    "Stop": [
-        {
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": "claude-ledger capture --stop-note",
-                "timeout": 2,
-            }],
-        },
-    ],
-    "SessionEnd": [
-        {
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": "claude-ledger capture --session-end",
-                "timeout": 5,
-            }],
-        },
-    ],
-    "SessionStart": [
-        {
-            "matcher": "",
-            "hooks": [{
-                "type": "command",
-                "command": "claude-ledger briefing",
-                "timeout": 5,
-            }],
-        },
-    ],
-}
+# Patterns that indicate existing ledger hooks (from manual installs or prior versions)
+EXISTING_LEDGER_PATTERNS = ["capture-activity.py", "generate-briefing.py", "claude-ledger"]
+
+
+def _resolve_cli_path() -> str:
+    """Find the absolute path to the claude-ledger binary.
+
+    Falls back to 'claude-ledger' (bare name) only if it's on PATH.
+    Returns the absolute path to use in hook commands.
+    """
+    import shutil
+
+    # 1. Check if 'claude-ledger' is on PATH
+    on_path = shutil.which("claude-ledger")
+    if on_path:
+        return on_path
+
+    # 2. Try common pip --user install locations
+    candidates = [
+        Path.home() / "Library" / "Python" / "3.9" / "bin" / "claude-ledger",  # macOS system Python
+        Path.home() / "Library" / "Python" / "3.10" / "bin" / "claude-ledger",
+        Path.home() / "Library" / "Python" / "3.11" / "bin" / "claude-ledger",
+        Path.home() / "Library" / "Python" / "3.12" / "bin" / "claude-ledger",
+        Path.home() / "Library" / "Python" / "3.13" / "bin" / "claude-ledger",
+        Path.home() / ".local" / "bin" / "claude-ledger",  # Linux pip --user
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+
+    # 3. Try python -m as fallback
+    python_path = shutil.which("python3") or shutil.which("python")
+    if python_path:
+        return f"{python_path} -m claude_ledger"
+
+    # 4. Last resort — bare name (will fail if not on PATH, but at least
+    #    the error message will be clear)
+    return "claude-ledger"
+
+
+def _build_hooks_spec(cli_path: str) -> dict:
+    """Build the hooks spec using the resolved CLI path."""
+    # Determine if we're using 'python -m' style or direct binary
+    if " -m " in cli_path:
+        capture_cmd = f"{cli_path}.capture"  # python3 -m claude_ledger.capture
+        briefing_cmd = f"{cli_path}.briefing"
+        # Actually, use the CLI subcommand approach
+        capture_touch = f"{cli_path} capture --touch"
+        capture_commit = f"{cli_path} capture --commit"
+        capture_stop = f"{cli_path} capture --stop-note"
+        capture_end = f"{cli_path} capture --session-end"
+        briefing = f"{cli_path} briefing"
+    else:
+        capture_touch = f"{cli_path} capture --touch"
+        capture_commit = f"{cli_path} capture --commit"
+        capture_stop = f"{cli_path} capture --stop-note"
+        capture_end = f"{cli_path} capture --session-end"
+        briefing = f"{cli_path} briefing"
+
+    return {
+        "PostToolUse": [
+            {
+                "matcher": "Edit|Write|MultiEdit",
+                "hooks": [{"type": "command", "command": capture_touch, "timeout": 2}],
+            },
+            {
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": capture_commit, "timeout": 3}],
+            },
+        ],
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": capture_stop, "timeout": 2}],
+            },
+        ],
+        "SessionEnd": [
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": capture_end, "timeout": 5}],
+            },
+        ],
+        "SessionStart": [
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": briefing, "timeout": 5}],
+            },
+        ],
+    }
+
 
 HOOK_MARKER = "claude-ledger"
 
 
-def _merge_hooks(settings_path: Path) -> list[str]:
+def _has_existing_ledger_hooks(settings_path: Path) -> bool:
+    """Check if settings.json already has ledger hooks (from manual install or prior version)."""
+    if not settings_path.exists():
+        return False
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    hooks = settings.get("hooks", {})
+    for entries in hooks.values():
+        for entry in entries:
+            for h in entry.get("hooks", []):
+                cmd = h.get("command", "")
+                for pattern in EXISTING_LEDGER_PATTERNS:
+                    if pattern in cmd:
+                        return True
+    return False
+
+
+def _merge_hooks(settings_path: Path, hooks_spec: dict) -> list[str]:
     """Safely merge ledger hooks into existing settings.json.
 
     Returns list of hook types that were added.
@@ -113,19 +174,22 @@ def _merge_hooks(settings_path: Path) -> list[str]:
     hooks = settings.setdefault("hooks", {})
     added: list[str] = []
 
-    for event_type, new_entries in HOOKS_SPEC.items():
+    for event_type, new_entries in hooks_spec.items():
         existing = hooks.get(event_type, [])
 
         for new_entry in new_entries:
-            # Check if our hook already exists (by command string)
+            # Check if any existing hook matches (by any ledger pattern)
             already_installed = False
             for existing_entry in existing:
                 for h in existing_entry.get("hooks", []):
-                    if HOOK_MARKER in h.get("command", ""):
-                        # Check same matcher
-                        if existing_entry.get("matcher", "") == new_entry.get("matcher", ""):
-                            already_installed = True
-                            break
+                    cmd = h.get("command", "")
+                    for pattern in EXISTING_LEDGER_PATTERNS:
+                        if pattern in cmd:
+                            if existing_entry.get("matcher", "") == new_entry.get("matcher", ""):
+                                already_installed = True
+                                break
+                    if already_installed:
+                        break
                 if already_installed:
                     break
 
@@ -245,13 +309,28 @@ def init(ctx: click.Context, scan_dirs: tuple[str, ...], github_user: str | None
 
     # 5. Install hooks
     settings_path = Path.home() / ".claude" / "settings.json"
-    added = _merge_hooks(settings_path)
-    if added:
-        click.echo(f"  Installed {len(added)} hooks:")
-        for h in added:
-            click.echo(f"    + {h}")
+
+    # Check for existing ledger hooks (from manual install or prior version)
+    if _has_existing_ledger_hooks(settings_path):
+        click.echo("  Ledger hooks already present in settings.json (skipped)")
+        click.echo("    Existing hooks detected (capture-activity.py or claude-ledger).")
+        click.echo("    To replace them, run 'claude-ledger uninstall' first, then re-run init.")
     else:
-        click.echo("  Hooks already installed (skipped)")
+        # Resolve the absolute path to the CLI binary
+        cli_path = _resolve_cli_path()
+        if "claude-ledger" in cli_path and "/" not in cli_path:
+            click.echo(f"  WARNING: 'claude-ledger' is not on PATH.")
+            click.echo(f"    Hooks may fail. Add the install directory to your PATH,")
+            click.echo(f"    or reinstall with: pip install claude-ledger")
+
+        hooks_spec = _build_hooks_spec(cli_path)
+        added = _merge_hooks(settings_path, hooks_spec)
+        if added:
+            click.echo(f"  Installed {len(added)} hooks (using {cli_path}):")
+            for h in added:
+                click.echo(f"    + {h}")
+        else:
+            click.echo("  Hooks already installed (skipped)")
 
     click.echo("\nDone! Next steps:")
     click.echo("  1. Edit ledger.yaml to configure your scan directories")
