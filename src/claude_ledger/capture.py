@@ -258,11 +258,107 @@ def _insert_bullet_into_content(content: str, heading: str, bullet: str) -> str:
     return f"## Activity Log\n\n{heading}\n{bullet}\n" + content
 
 
+def _auto_discover_project(file_path: str, config: Any, ledger_dir: Path) -> tuple[str | None, str | None]:
+    """Auto-discover and create a ledger file for an untracked project.
+
+    If the file is inside a configured scan_dir and the parent directory
+    looks like a project (has .git), creates a minimal ledger file and
+    updates the directory index.
+
+    Returns (slug, directory) if discovered, (None, None) otherwise.
+    """
+    file_path = os.path.abspath(file_path)
+
+    for scan_dir in config.scan_dirs:
+        scan_dir_str = str(scan_dir)
+        if not file_path.startswith(scan_dir_str + "/"):
+            continue
+
+        # Extract the project directory (first level under scan_dir)
+        remainder = file_path[len(scan_dir_str) + 1:]
+        parts = remainder.split("/", 1)
+        if not parts or not parts[0]:
+            continue
+
+        slug = parts[0]
+        project_dir = Path(scan_dir_str) / slug
+
+        if not project_dir.is_dir():
+            continue
+
+        # Skip dotfiles/hidden dirs
+        if slug.startswith("."):
+            continue
+
+        # Skip configured exclusions
+        if slug in config.skip_slugs or slug in config.no_track:
+            continue
+
+        # Path traversal guard
+        if not _is_safe_path_component(slug):
+            continue
+
+        ledger_path = (ledger_dir / f"{slug}.md").resolve()
+        if not str(ledger_path).startswith(str(ledger_dir.resolve())):
+            continue
+
+        # Already exists (race condition or index stale)
+        if ledger_path.exists():
+            # Just update the index and return
+            _update_directory_index(ledger_dir, slug, str(project_dir))
+            return slug, str(project_dir)
+
+        # Create a minimal ledger file
+        try:
+            post = frontmatter.Post("## Activity Log\n")
+            post.metadata = {
+                "name": slug.replace("-", " ").replace("_", " ").title(),
+                "slug": slug,
+                "directory": str(project_dir),
+                "repo_url": None,
+                "status": "active",
+                "priority": "P3",
+                "vision": "",
+                "current_phase": "discovered",
+                "last_session": datetime.now(timezone.utc).isoformat(),
+                "last_activity": "Auto-discovered from file edit",
+                "systems": [],
+                "tags": [],
+                "workstreams": [],
+            }
+            atomic_write_frontmatter(ledger_path, post)
+            _update_directory_index(ledger_dir, slug, str(project_dir))
+            return slug, str(project_dir)
+        except Exception:
+            return None, None
+
+    return None, None
+
+
+def _update_directory_index(ledger_dir: Path, slug: str, directory: str) -> None:
+    """Add a single entry to the directory index without a full rebuild."""
+    index_path = ledger_dir / "_directory_index.json"
+    index: dict[str, str] = {}
+    if index_path.exists():
+        try:
+            with open(index_path) as f:
+                index = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    if index.get(directory) != slug:
+        index[directory] = slug
+        atomic_write_json(index_path, index)
+
+
 # === MODE HANDLERS ===
 
 
 def handle_touch(hook_data: dict[str, Any], ledger_dir: Path) -> None:
-    """Record project from edited file paths."""
+    """Record project from edited file paths.
+
+    If the file is in an untracked project inside a configured scan_dir,
+    auto-discovers it by creating a minimal ledger file.
+    """
     session_id = hook_data.get("session_id")
     if not session_id:
         return
@@ -273,12 +369,20 @@ def handle_touch(hook_data: dict[str, Any], ledger_dir: Path) -> None:
 
     config = load_config(ledger_dir)
     slug, directory = _resolve_project_from_path(file_path, ledger_dir)
+
+    # Auto-discover if not tracked yet
+    if not slug:
+        slug, directory = _auto_discover_project(file_path, config, ledger_dir)
+
     if slug:
         _touch_project(session_id, slug, directory, config.state_dir, config.locks_dir)
 
 
 def handle_commit(hook_data: dict[str, Any], ledger_dir: Path) -> None:
-    """Capture git commit metadata."""
+    """Capture git commit metadata.
+
+    Auto-discovers untracked projects on first commit.
+    """
     session_id = hook_data.get("session_id")
     cwd = hook_data.get("cwd", "")
     if not session_id:
@@ -286,6 +390,10 @@ def handle_commit(hook_data: dict[str, Any], ledger_dir: Path) -> None:
 
     config = load_config(ledger_dir)
     slug, directory = _resolve_project_from_cwd(cwd, ledger_dir)
+
+    # Auto-discover if not tracked yet
+    if not slug and cwd:
+        slug, directory = _auto_discover_project(cwd + "/dummy", config, ledger_dir)
     if slug:
         _touch_project(session_id, slug, directory, config.state_dir, config.locks_dir)
 

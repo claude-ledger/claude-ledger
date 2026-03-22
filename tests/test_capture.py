@@ -7,6 +7,7 @@ import frontmatter
 
 from claude_ledger.capture import (
     _append_activity,
+    _auto_discover_project,
     _get_session_state,
     _insert_bullet_into_content,
     _is_safe_path_component,
@@ -14,13 +15,14 @@ from claude_ledger.capture import (
     _resolve_project_from_path,
     _save_session_state,
     _touch_project,
+    _update_directory_index,
     handle_commit,
     handle_session_end,
     handle_stop_note,
     handle_touch,
     rebuild_directory_index,
 )
-from claude_ledger.config import load_config
+from claude_ledger.config import Config, load_config
 
 
 class TestResolveProjectFromPath:
@@ -328,3 +330,157 @@ class TestHandleCommit:
         state = _get_session_state("sess-commit-fail", config.state_dir)
         proj = state.get("projects", {}).get("test-project", {})
         assert proj.get("commits", []) == []
+
+
+class TestAutoDiscoverProject:
+    def test_discovers_new_project_in_scan_dir(self, tmp_path):
+        """Auto-creates ledger file when editing a file in an untracked project."""
+        scan_dir = tmp_path / "code"
+        scan_dir.mkdir()
+        project_dir = scan_dir / "new-project"
+        project_dir.mkdir()
+        (project_dir / "main.py").write_text("print('hello')")
+
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+
+        config = Config(ledger_dir=ledger_dir, scan_dirs=[scan_dir])
+
+        slug, directory = _auto_discover_project(
+            str(project_dir / "main.py"), config, ledger_dir,
+        )
+
+        assert slug == "new-project"
+        assert directory == str(project_dir)
+        assert (ledger_dir / "new-project.md").exists()
+
+        # Verify frontmatter
+        import frontmatter as fm
+        post = fm.load(str(ledger_dir / "new-project.md"))
+        assert post.metadata["slug"] == "new-project"
+        assert post.metadata["status"] == "active"
+        assert post.metadata["current_phase"] == "discovered"
+
+    def test_skips_file_outside_scan_dirs(self, tmp_path):
+        """Does not discover projects outside configured scan dirs."""
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        config = Config(ledger_dir=ledger_dir, scan_dirs=[tmp_path / "code"])
+
+        slug, directory = _auto_discover_project(
+            "/some/other/path/file.py", config, ledger_dir,
+        )
+        assert slug is None
+
+    def test_skips_configured_exclusions(self, tmp_path):
+        """Respects skip_slugs config."""
+        scan_dir = tmp_path / "code"
+        project_dir = scan_dir / "excluded-project"
+        project_dir.mkdir(parents=True)
+        (project_dir / "file.py").write_text("")
+
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+
+        config = Config(
+            ledger_dir=ledger_dir,
+            scan_dirs=[scan_dir],
+            skip_slugs=["excluded-project"],
+        )
+
+        slug, _ = _auto_discover_project(
+            str(project_dir / "file.py"), config, ledger_dir,
+        )
+        assert slug is None
+
+    def test_skips_hidden_dirs(self, tmp_path):
+        """Does not discover dotfile directories."""
+        scan_dir = tmp_path / "code"
+        hidden_dir = scan_dir / ".hidden"
+        hidden_dir.mkdir(parents=True)
+        (hidden_dir / "file.py").write_text("")
+
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        config = Config(ledger_dir=ledger_dir, scan_dirs=[scan_dir])
+
+        slug, _ = _auto_discover_project(
+            str(hidden_dir / "file.py"), config, ledger_dir,
+        )
+        assert slug is None
+
+    def test_updates_directory_index(self, tmp_path):
+        """Auto-discovery updates the directory index."""
+        scan_dir = tmp_path / "code"
+        project_dir = scan_dir / "indexed-proj"
+        project_dir.mkdir(parents=True)
+        (project_dir / "app.py").write_text("")
+
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        config = Config(ledger_dir=ledger_dir, scan_dirs=[scan_dir])
+
+        _auto_discover_project(str(project_dir / "app.py"), config, ledger_dir)
+
+        index_path = ledger_dir / "_directory_index.json"
+        assert index_path.exists()
+        with open(index_path) as f:
+            index = json.load(f)
+        assert index[str(project_dir)] == "indexed-proj"
+
+    def test_returns_existing_if_ledger_file_exists(self, tmp_path):
+        """If ledger file already exists (stale index), returns it without recreating."""
+        scan_dir = tmp_path / "code"
+        project_dir = scan_dir / "existing-proj"
+        project_dir.mkdir(parents=True)
+
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+
+        # Pre-create ledger file
+        import frontmatter as fm
+        post = fm.Post("## Activity Log\n")
+        post.metadata = {"slug": "existing-proj", "directory": str(project_dir), "name": "Custom Name"}
+        with open(ledger_dir / "existing-proj.md", "w") as f:
+            f.write(fm.dumps(post))
+
+        config = Config(ledger_dir=ledger_dir, scan_dirs=[scan_dir])
+        slug, directory = _auto_discover_project(
+            str(project_dir / "file.py"), config, ledger_dir,
+        )
+        assert slug == "existing-proj"
+
+
+class TestUpdateDirectoryIndex:
+    def test_creates_index_if_missing(self, tmp_path):
+        _update_directory_index(tmp_path, "my-proj", "/code/my-proj")
+        index_path = tmp_path / "_directory_index.json"
+        assert index_path.exists()
+        with open(index_path) as f:
+            data = json.load(f)
+        assert data["/code/my-proj"] == "my-proj"
+
+    def test_appends_to_existing_index(self, tmp_path):
+        # Pre-populate
+        with open(tmp_path / "_directory_index.json", "w") as f:
+            json.dump({"/code/old": "old-proj"}, f)
+
+        _update_directory_index(tmp_path, "new-proj", "/code/new")
+
+        with open(tmp_path / "_directory_index.json") as f:
+            data = json.load(f)
+        assert data["/code/old"] == "old-proj"
+        assert data["/code/new"] == "new-proj"
+
+    def test_noop_if_already_correct(self, tmp_path):
+        with open(tmp_path / "_directory_index.json", "w") as f:
+            json.dump({"/code/proj": "proj"}, f)
+
+        mtime_before = (tmp_path / "_directory_index.json").stat().st_mtime
+        import time
+        time.sleep(0.01)
+        _update_directory_index(tmp_path, "proj", "/code/proj")
+        mtime_after = (tmp_path / "_directory_index.json").stat().st_mtime
+
+        # Should not rewrite if already correct
+        assert mtime_before == mtime_after
