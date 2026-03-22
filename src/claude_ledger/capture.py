@@ -25,7 +25,7 @@ from typing import Any
 
 import frontmatter
 
-from claude_ledger.config import DEFAULT_LEDGER_DIR, Config, load_config
+from claude_ledger.config import DEFAULT_LEDGER_DIR, load_config
 from claude_ledger.utils import (
     acquire_lock,
     atomic_write_frontmatter,

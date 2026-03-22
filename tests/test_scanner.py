@@ -1,10 +1,7 @@
 """Tests for the portfolio scanner."""
 
 import json
-import subprocess
-from pathlib import Path
 
-import pytest
 
 from claude_ledger.config import Config
 from claude_ledger.scanner import (

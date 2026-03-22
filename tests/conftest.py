@@ -1,14 +1,10 @@
 """Shared fixtures for claude-ledger tests."""
 
-import json
-import os
 import subprocess
-from pathlib import Path
 
 import frontmatter
 import pytest
 
-from claude_ledger.config import Config, WorkstreamConfig
 
 
 @pytest.fixture

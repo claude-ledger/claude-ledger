@@ -3,7 +3,6 @@
 from datetime import datetime, timezone, timedelta
 
 import frontmatter
-import pytest
 
 from claude_ledger.briefing import (
     generate_briefing,

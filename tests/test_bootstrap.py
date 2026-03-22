@@ -1,10 +1,8 @@
 """Tests for bootstrap and heuristic inference."""
 
 from datetime import datetime, timezone
-from pathlib import Path
 
 import frontmatter
-import pytest
 
 from claude_ledger.bootstrap import (
     bootstrap_from_scan,

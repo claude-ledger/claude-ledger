@@ -6,7 +6,6 @@ import pytest
 
 from claude_ledger.config import (
     Config,
-    WorkstreamConfig,
     expand_path,
     generate_default_config,
     load_config,

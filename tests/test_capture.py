@@ -2,10 +2,8 @@
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
 import frontmatter
-import pytest
 
 from claude_ledger.capture import (
     _append_activity,
@@ -13,13 +11,12 @@ from claude_ledger.capture import (
     _resolve_project_from_path,
     _save_session_state,
     _touch_project,
-    handle_commit,
     handle_session_end,
     handle_stop_note,
     handle_touch,
     rebuild_directory_index,
 )
-from claude_ledger.config import Config, load_config
+from claude_ledger.config import load_config
 
 
 class TestResolveProjectFromPath:

@@ -2,10 +2,8 @@
 
 import json
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 
 import frontmatter
-import pytest
 
 from claude_ledger.utils import (
     acquire_lock,
