@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,11 +31,16 @@ class ScanResults:
         return asdict(self)
 
 
-def _run_cmd(cmd: str, cwd: str | None = None, timeout: int = 30) -> str | None:
-    """Run a shell command, return stdout or None on failure."""
+def _run_cmd(cmd: list[str] | str, cwd: str | None = None, timeout: int = 30) -> str | None:
+    """Run a command, return stdout or None on failure.
+
+    Accepts a list (preferred, no shell) or a string (uses shell=True for
+    backwards compatibility with callers like scan_github_repos).
+    """
+    use_shell = isinstance(cmd, str)
     try:
         result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True,
+            cmd, shell=use_shell, capture_output=True, text=True,
             cwd=cwd, timeout=timeout,
         )
         return result.stdout.strip() if result.returncode == 0 else None
@@ -43,55 +49,65 @@ def _run_cmd(cmd: str, cwd: str | None = None, timeout: int = 30) -> str | None:
 
 
 def scan_git_metadata(project_dir: Path) -> dict[str, Any]:
-    """Extract git metadata from a local project directory."""
+    """Extract git metadata from a local project directory.
+
+    Batches git queries into two subprocess calls (down from six) for speed.
+    """
     d = str(project_dir)
+    empty = {
+        "has_git": False,
+        "remote_url": None,
+        "default_branch": None,
+        "last_commit_date": None,
+        "last_commit_subject": None,
+        "commit_count_30d": 0,
+        "branch_count": 0,
+        "recent_commits": [],
+    }
     if not (project_dir / ".git").exists():
-        return {
-            "has_git": False,
-            "remote_url": None,
-            "default_branch": None,
-            "last_commit_date": None,
-            "last_commit_subject": None,
-            "commit_count_30d": 0,
-            "branch_count": 0,
-            "recent_commits": [],
-        }
+        return empty
 
-    remote = _run_cmd("git remote get-url origin", cwd=d)
-    branch = _run_cmd("git branch --show-current", cwd=d) or _run_cmd(
-        "git rev-parse --abbrev-ref HEAD", cwd=d
+    # --- Batch 1: metadata that doesn't need log formatting ---
+    # Four queries joined by a NUL separator so we can split reliably.
+    batch1_script = (
+        'remote=$(git remote get-url origin 2>/dev/null || echo ""); '
+        'branch=$(git branch --show-current 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""); '
+        'count=$(git rev-list --count --since="30 days ago" HEAD 2>/dev/null || echo "0"); '
+        'branches=$(git branch -a 2>/dev/null | wc -l | tr -d " "); '
+        'printf "%s\\0%s\\0%s\\0%s" "$remote" "$branch" "$count" "$branches"'
     )
+    batch1_raw = _run_cmd(["sh", "-c", batch1_script], cwd=d)
+    if batch1_raw is None:
+        return empty
 
-    # Last commit
-    last_log = _run_cmd('git log -1 --format="%H|%h|%s|%cI"', cwd=d)
+    parts1 = batch1_raw.split("\0")
+    remote = parts1[0] if len(parts1) > 0 and parts1[0] else None
+    branch = parts1[1] if len(parts1) > 1 and parts1[1] else None
+    count_str = parts1[2] if len(parts1) > 2 else "0"
+    branch_count_str = parts1[3] if len(parts1) > 3 else "0"
+    commit_count_30d = int(count_str) if count_str.isdigit() else 0
+    branch_count = int(branch_count_str) if branch_count_str.isdigit() else 0
+
+    # --- Batch 2: recent commits (includes the -1 data we need) ---
+    recent_raw = _run_cmd(
+        ["git", "log", "-10", "--format=%h|%s|%cI"],
+        cwd=d,
+    )
     last_date = None
     last_subject = None
-    if last_log:
-        parts = last_log.split("|", 3)
-        if len(parts) >= 4:
-            last_date = parts[3]
-            last_subject = parts[2]
-
-    # Commit count last 30 days
-    count_str = _run_cmd('git rev-list --count --since="30 days ago" HEAD', cwd=d)
-    commit_count_30d = int(count_str) if count_str and count_str.isdigit() else 0
-
-    # Branch count
-    branches = _run_cmd("git branch -a", cwd=d)
-    branch_count = len([b for b in (branches or "").splitlines() if b.strip()]) if branches else 0
-
-    # Recent commits (last 10)
-    recent_raw = _run_cmd('git log -10 --format="%h|%s|%cI"', cwd=d)
-    recent_commits = []
+    recent_commits: list[dict[str, str]] = []
     if recent_raw:
         for line in recent_raw.splitlines():
-            parts = line.split("|", 2)
-            if len(parts) >= 3:
+            line_parts = line.split("|", 2)
+            if len(line_parts) >= 3:
                 recent_commits.append({
-                    "sha": parts[0],
-                    "subject": parts[1],
-                    "date": parts[2],
+                    "sha": line_parts[0],
+                    "subject": line_parts[1],
+                    "date": line_parts[2],
                 })
+        if recent_commits:
+            last_date = recent_commits[0]["date"]
+            last_subject = recent_commits[0]["subject"]
 
     return {
         "has_git": True,
@@ -172,51 +188,60 @@ def _is_boilerplate_line(line: str) -> bool:
     return False
 
 
-def extract_readme(project_dir: Path) -> str | None:
+def _read_readme_lines(project_dir: Path) -> list[str] | None:
+    """Read README.md and return lines, or None if missing/unreadable."""
+    readme_path = project_dir / "README.md"
+    if not readme_path.exists():
+        return None
+    try:
+        return readme_path.read_text(encoding="utf-8", errors="replace").split("\n")
+    except OSError:
+        return None
+
+
+def extract_readme(project_dir: Path, lines: list[str] | None = None) -> str | None:
     """Extract description from README.md.
 
     Returns the first meaningful paragraph after the title, filtering out
     badges, code blocks, boilerplate, and HTML tags.
+
+    If *lines* is provided, uses them directly instead of re-reading the file.
     """
-    readme_path = project_dir / "README.md"
-    if not readme_path.exists():
+    if lines is None:
+        lines = _read_readme_lines(project_dir)
+    if lines is None:
         return None
 
-    try:
-        content = readme_path.read_text(encoding="utf-8", errors="replace")
-        lines = content.split("\n")
-        desc_lines: list[str] = []
-        past_title = False
-        in_code_block = False
+    desc_lines: list[str] = []
+    past_title = False
+    in_code_block = False
 
-        for line in lines:
-            # Track code blocks
-            if line.strip().startswith("```") or line.strip().startswith("~~~"):
-                in_code_block = not in_code_block
-                continue
-            if in_code_block:
-                continue
+    for line in lines:
+        # Track code blocks
+        if line.strip().startswith("```") or line.strip().startswith("~~~"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
 
-            if line.startswith("# "):
-                past_title = True
-                continue
+        if line.startswith("# "):
+            past_title = True
+            continue
 
-            if past_title:
-                if line.strip() == "":
-                    if desc_lines:
-                        break
-                    continue
-                if line.startswith("#"):
+        if past_title:
+            if line.strip() == "":
+                if desc_lines:
                     break
-                if _is_boilerplate_line(line):
-                    if desc_lines:
-                        break
-                    continue
-                desc_lines.append(line.strip())
+                continue
+            if line.startswith("#"):
+                break
+            if _is_boilerplate_line(line):
+                if desc_lines:
+                    break
+                continue
+            desc_lines.append(line.strip())
 
-        return " ".join(desc_lines)[:500] if desc_lines else None
-    except OSError:
-        return None
+    return " ".join(desc_lines)[:500] if desc_lines else None
 
 
 def scan_tech_stack(project_dir: Path) -> tuple[list[str], str | None, bool]:
@@ -293,19 +318,13 @@ def scan_local_directory(project_dir: Path, github_user: str | None = None) -> d
     slug = project_dir.name
     git_meta = scan_git_metadata(project_dir)
     claude_md = extract_claude_md(project_dir)
-    readme_desc = extract_readme(project_dir)
     tech_stack, pkg_desc, has_pkg = scan_tech_stack(project_dir)
     structure = scan_structure(project_dir)
 
-    # Extract README title separately from description
-    readme_title = None
-    readme_path = project_dir / "README.md"
-    if readme_path.exists():
-        try:
-            readme_lines = readme_path.read_text(encoding="utf-8", errors="replace").split("\n")
-            readme_title = _extract_readme_title(readme_lines)
-        except OSError:
-            pass
+    # Read README once, pass lines to both title and description extractors
+    readme_lines = _read_readme_lines(project_dir)
+    readme_desc = extract_readme(project_dir, lines=readme_lines)
+    readme_title = _extract_readme_title(readme_lines) if readme_lines else None
 
     remote_url = git_meta.get("remote_url")
     third_party = bool(remote_url and github_user and github_user not in remote_url)
@@ -410,7 +429,7 @@ def scan_portfolio(config: Config, log_fn: Any = None) -> ScanResults:
     all_projects: list[dict[str, Any]] = []
     all_slugs: list[str] = []
 
-    # Scan local directories
+    # Scan local directories (parallel within each scan_dir)
     for scan_dir in config.scan_dirs:
         if not scan_dir.exists():
             log(f"Skipping {scan_dir} (does not exist)")
@@ -423,19 +442,27 @@ def scan_portfolio(config: Config, log_fn: Any = None) -> ScanResults:
         ])
         log(f"  Found {len(subdirs)} directories")
 
-        for project_dir in subdirs:
-            try:
-                result = scan_local_directory(project_dir, config.github_user)
-                all_projects.append(result)
-                all_slugs.append(result["slug"])
-            except Exception as e:
-                log(f"  ERROR scanning {project_dir.name}: {e}")
-                all_projects.append({
-                    "slug": project_dir.name,
-                    "scan_status": "failed",
-                    "local_directory": str(project_dir),
-                    "error": str(e),
-                })
+        # Use threads to parallelise I/O-bound git subprocess calls
+        max_workers = min(8, len(subdirs)) if subdirs else 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_dir = {
+                executor.submit(scan_local_directory, d, config.github_user): d
+                for d in subdirs
+            }
+            for future in as_completed(future_to_dir):
+                project_dir = future_to_dir[future]
+                try:
+                    result = future.result()
+                    all_projects.append(result)
+                    all_slugs.append(result["slug"])
+                except Exception as e:
+                    log(f"  ERROR scanning {project_dir.name}: {e}")
+                    all_projects.append({
+                        "slug": project_dir.name,
+                        "scan_status": "failed",
+                        "local_directory": str(project_dir),
+                        "error": str(e),
+                    })
 
     # Deduplicate by slug (keep more recently active)
     seen: dict[str, dict[str, Any]] = {}

@@ -91,7 +91,11 @@ def _resolve_project_from_path(file_path: str, ledger_dir: Path) -> tuple[str | 
 
 
 def _resolve_project_from_cwd(cwd: str, ledger_dir: Path) -> tuple[str | None, str | None]:
-    """Resolve cwd to a project slug."""
+    """Resolve cwd to a project slug.
+
+    Checks the directory index first (fast path, ~0.02ms) before falling
+    back to ``git rev-parse --show-toplevel`` (~8.5ms subprocess overhead).
+    """
     if not cwd:
         return None, None
 
@@ -99,7 +103,12 @@ def _resolve_project_from_cwd(cwd: str, ledger_dir: Path) -> tuple[str | None, s
     if cwd in ignore:
         return None, None
 
-    # Try git repo root first
+    # Fast path: try directory index before spawning git
+    slug, proj_dir = _resolve_project_from_path(cwd + "/dummy", ledger_dir)
+    if slug:
+        return slug, proj_dir
+
+    # Slow path: ask git for the repo root (cwd may be a subdirectory)
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -113,7 +122,7 @@ def _resolve_project_from_cwd(cwd: str, ledger_dir: Path) -> tuple[str | None, s
     except (subprocess.TimeoutExpired, OSError):
         pass
 
-    return _resolve_project_from_path(cwd + "/dummy", ledger_dir)
+    return None, None
 
 
 def _get_session_state(session_id: str, state_dir: Path) -> dict[str, Any]:
