@@ -105,12 +105,22 @@ def generate_portfolio(projects: list[dict], stale_days: int = 7) -> str:
 
 
 def generate_workstreams(projects: list[dict], config: Config) -> str:
-    """Generate _workstreams.md content — cross-project workstream map."""
+    """Generate _workstreams.md content — cross-project workstream map.
+
+    Includes both explicit workstreams (from config) and implicit workstreams
+    from sub-projects that share a parent repo.
+    """
     now = datetime.now(timezone.utc)
     date_str = f"{now.day} {now.strftime('%B %Y')}"
 
     workstream_members: dict[str, list[dict]] = {}
     unassigned: list[str] = []
+
+    # Build a slug lookup for sub-project parent grouping
+    sub_project_slugs = set(config.sub_projects.keys()) if config.sub_projects else set()
+    parent_to_children: dict[str, list[str]] = {}
+    for slug, sp in (config.sub_projects or {}).items():
+        parent_to_children.setdefault(sp.parent, []).append(slug)
 
     for p in projects:
         if p.get("status") == "archived":
@@ -161,6 +171,49 @@ def generate_workstreams(projects: list[dict], config: Config) -> str:
             )
 
         sections.append("")
+
+    # Auto-generate sub-project groups (implicit workstreams from shared parents)
+    project_by_slug = {p.get("slug", ""): p for p in projects}
+    for parent_slug, children in sorted(parent_to_children.items()):
+        # Collect parent + children as group members
+        group_members = []
+        parent = project_by_slug.get(parent_slug)
+        if parent and parent.get("status") != "archived":
+            group_members.append(parent)
+        for child_slug in children:
+            child = project_by_slug.get(child_slug)
+            if child and child.get("status") != "archived":
+                group_members.append(child)
+
+        if len(group_members) < 2:
+            continue
+
+        parent_name = parent.get("name", parent_slug) if parent else parent_slug
+        sections.append(f"## {parent_name} (sub-projects) [{parent_slug}]")
+
+        for p in group_members:
+            name = p.get("name", p.get("slug", "?"))
+            priority = p.get("priority", "P3")
+            status = p.get("status", "?")
+            phase = p.get("current_phase", "")
+            is_parent = p.get("slug") == parent_slug
+            marker = " [parent]" if is_parent else ""
+            sections.append(f"- **{name}** ({priority}, {status}) — {phase}{marker}")
+
+        # Sub-projects always get a cascade warning — they share a repo
+        sections.append(
+            f"> CASCADE: these {len(group_members)} projects share the {parent_name} "
+            f"repo — changes to shared code affect all sub-projects"
+        )
+
+        sections.append("")
+
+        # Remove sub-project entries from unassigned (they're now grouped)
+        grouped_names = {p.get("name", p.get("slug", "?")) for p in group_members}
+        unassigned = [
+            line for line in unassigned
+            if not any(f"**{gn}**" in line for gn in grouped_names)
+        ]
 
     if unassigned:
         sections.append("## Unassigned")

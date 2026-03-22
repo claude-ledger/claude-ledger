@@ -147,6 +147,20 @@ stale_days: 7
 skip_slugs: []
 no_track: []
 
+# Sub-projects inside a parent repo (optional)
+# When you have multiple logical projects in one repo, map paths to slugs.
+# Each gets its own ledger file + cascade warnings in the workstream map.
+sub_projects:
+  studio-manager:
+    parent: my-monorepo
+    paths:
+      - "docs/hr/*"
+      - "docs/projects/STUDIO-MANAGER*"
+  curriculum:
+    parent: my-monorepo
+    paths:
+      - "docs/curriculum/*"
+
 # Group related projects into workstreams (optional)
 workstreams:
   backend:

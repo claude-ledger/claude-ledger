@@ -22,7 +22,7 @@ from claude_ledger.capture import (
     handle_touch,
     rebuild_directory_index,
 )
-from claude_ledger.config import Config, load_config
+from claude_ledger.config import Config, SubProjectConfig, load_config
 
 
 class TestResolveProjectFromPath:
@@ -484,3 +484,115 @@ class TestUpdateDirectoryIndex:
 
         # Should not rewrite if already correct
         assert mtime_before == mtime_after
+
+
+class TestSubProjectResolution:
+    def _setup_parent(self, tmp_path):
+        """Create a parent project with directory index."""
+        ledger_dir = tmp_path / "ledger"
+        ledger_dir.mkdir()
+        parent_dir = tmp_path / "code" / "mouve-engine"
+        parent_dir.mkdir(parents=True)
+        (parent_dir / "docs" / "hr").mkdir(parents=True)
+        (parent_dir / "docs" / "curriculum").mkdir(parents=True)
+        (parent_dir / "src").mkdir()
+
+        # Write directory index
+        index = {str(parent_dir): "mouve-engine"}
+        with open(ledger_dir / "_directory_index.json", "w") as f:
+            json.dump(index, f)
+
+        return ledger_dir, parent_dir
+
+    def test_matches_sub_project_path(self, tmp_path):
+        ledger_dir, parent_dir = self._setup_parent(tmp_path)
+        config = Config(
+            ledger_dir=ledger_dir,
+            sub_projects={
+                "studio-manager": SubProjectConfig(
+                    parent="mouve-engine",
+                    paths=["docs/hr/*"],
+                ),
+            },
+        )
+        slug, directory = _resolve_project_from_path(
+            str(parent_dir / "docs" / "hr" / "jd.md"), ledger_dir, config,
+        )
+        assert slug == "studio-manager"
+
+    def test_falls_through_to_parent_for_non_matching_path(self, tmp_path):
+        ledger_dir, parent_dir = self._setup_parent(tmp_path)
+        config = Config(
+            ledger_dir=ledger_dir,
+            sub_projects={
+                "studio-manager": SubProjectConfig(
+                    parent="mouve-engine",
+                    paths=["docs/hr/*"],
+                ),
+            },
+        )
+        slug, directory = _resolve_project_from_path(
+            str(parent_dir / "src" / "main.py"), ledger_dir, config,
+        )
+        assert slug == "mouve-engine"
+
+    def test_multiple_sub_projects_in_same_parent(self, tmp_path):
+        ledger_dir, parent_dir = self._setup_parent(tmp_path)
+        config = Config(
+            ledger_dir=ledger_dir,
+            sub_projects={
+                "studio-manager": SubProjectConfig(
+                    parent="mouve-engine",
+                    paths=["docs/hr/*"],
+                ),
+                "curriculum": SubProjectConfig(
+                    parent="mouve-engine",
+                    paths=["docs/curriculum/*"],
+                ),
+            },
+        )
+
+        slug1, _ = _resolve_project_from_path(
+            str(parent_dir / "docs" / "hr" / "jd.md"), ledger_dir, config,
+        )
+        slug2, _ = _resolve_project_from_path(
+            str(parent_dir / "docs" / "curriculum" / "ballet.md"), ledger_dir, config,
+        )
+        assert slug1 == "studio-manager"
+        assert slug2 == "curriculum"
+
+    def test_glob_pattern_with_double_star(self, tmp_path):
+        ledger_dir, parent_dir = self._setup_parent(tmp_path)
+        (parent_dir / "docs" / "hr" / "templates").mkdir()
+
+        config = Config(
+            ledger_dir=ledger_dir,
+            sub_projects={
+                "studio-manager": SubProjectConfig(
+                    parent="mouve-engine",
+                    paths=["docs/hr/**"],
+                ),
+            },
+        )
+        slug, _ = _resolve_project_from_path(
+            str(parent_dir / "docs" / "hr" / "templates" / "offer.md"), ledger_dir, config,
+        )
+        assert slug == "studio-manager"
+
+    def test_no_sub_projects_configured(self, tmp_path):
+        ledger_dir, parent_dir = self._setup_parent(tmp_path)
+        config = Config(ledger_dir=ledger_dir)
+
+        slug, _ = _resolve_project_from_path(
+            str(parent_dir / "docs" / "hr" / "jd.md"), ledger_dir, config,
+        )
+        assert slug == "mouve-engine"  # falls through to parent
+
+    def test_backwards_compatible_without_config(self, tmp_path):
+        """Calling without config still works (no sub-project matching)."""
+        ledger_dir, parent_dir = self._setup_parent(tmp_path)
+
+        slug, _ = _resolve_project_from_path(
+            str(parent_dir / "docs" / "hr" / "jd.md"), ledger_dir,
+        )
+        assert slug == "mouve-engine"

@@ -72,14 +72,77 @@ def _get_ledger_dir() -> Path:
     return DEFAULT_LEDGER_DIR
 
 
-def _resolve_project_from_path(file_path: str, ledger_dir: Path) -> tuple[str | None, str | None]:
-    """Resolve a file path to a project slug by matching against ledger files."""
+def _resolve_sub_project(file_path: str, config: Any) -> tuple[str | None, str | None]:
+    """Check if a file path matches a configured sub-project.
+
+    Sub-projects are more specific than parent repos, so this runs first.
+    Returns (slug, parent_directory) if matched.
+    """
+    if not hasattr(config, "sub_projects") or not config.sub_projects:
+        return None, None
+
+    for slug, sp in config.sub_projects.items():
+        # Find the parent directory from the directory index or ledger
+        parent_dir = _find_parent_directory(sp.parent, config.ledger_dir)
+        if not parent_dir:
+            continue
+
+        if not file_path.startswith(parent_dir + "/"):
+            continue
+
+        # Get relative path within parent
+        relative = file_path[len(parent_dir) + 1:]
+        if sp.matches(relative):
+            return slug, parent_dir
+
+    return None, None
+
+
+def _find_parent_directory(parent_slug: str, ledger_dir: Path) -> str | None:
+    """Look up a parent project's directory from the index or ledger files."""
+    index_path = ledger_dir / "_directory_index.json"
+    if index_path.exists():
+        try:
+            with open(index_path) as f:
+                index = json.load(f)
+            for proj_dir, slug in index.items():
+                if slug == parent_slug:
+                    return proj_dir
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Fall back to scanning the parent's ledger file
+    parent_ledger = ledger_dir / f"{parent_slug}.md"
+    if parent_ledger.exists():
+        try:
+            post = frontmatter.load(parent_ledger)
+            return post.metadata.get("directory", "")
+        except Exception:
+            pass
+
+    return None
+
+
+def _resolve_project_from_path(
+    file_path: str, ledger_dir: Path, config: Any = None,
+) -> tuple[str | None, str | None]:
+    """Resolve a file path to a project slug.
+
+    Checks sub-projects first (most specific), then the directory index,
+    then falls back to scanning ledger files.
+    """
     if not file_path:
         return None, None
 
     file_path = os.path.abspath(file_path)
 
-    # Try directory index cache first (fast path)
+    # 1. Check sub-projects first (most specific match)
+    if config is not None:
+        slug, parent_dir = _resolve_sub_project(file_path, config)
+        if slug:
+            return slug, parent_dir
+
+    # 2. Try directory index cache (fast path)
     index_path = ledger_dir / "_directory_index.json"
     if index_path.exists():
         try:
@@ -91,7 +154,7 @@ def _resolve_project_from_path(file_path: str, ledger_dir: Path) -> tuple[str | 
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Fall back to scanning ledger files
+    # 3. Fall back to scanning ledger files
     for f in ledger_dir.glob("*.md"):
         if f.name.startswith("_") or f.name.endswith("-archive.md"):
             continue
@@ -106,11 +169,13 @@ def _resolve_project_from_path(file_path: str, ledger_dir: Path) -> tuple[str | 
     return None, None
 
 
-def _resolve_project_from_cwd(cwd: str, ledger_dir: Path) -> tuple[str | None, str | None]:
+def _resolve_project_from_cwd(
+    cwd: str, ledger_dir: Path, config: Any = None,
+) -> tuple[str | None, str | None]:
     """Resolve cwd to a project slug.
 
-    Checks the directory index first (fast path, ~0.02ms) before falling
-    back to ``git rev-parse --show-toplevel`` (~8.5ms subprocess overhead).
+    Checks sub-projects and the directory index first (fast path) before
+    falling back to ``git rev-parse --show-toplevel``.
     """
     if not cwd:
         return None, None
@@ -119,8 +184,8 @@ def _resolve_project_from_cwd(cwd: str, ledger_dir: Path) -> tuple[str | None, s
     if cwd in ignore:
         return None, None
 
-    # Fast path: try directory index before spawning git
-    slug, proj_dir = _resolve_project_from_path(cwd + "/dummy", ledger_dir)
+    # Fast path: try sub-projects + directory index before spawning git
+    slug, proj_dir = _resolve_project_from_path(cwd + "/dummy", ledger_dir, config)
     if slug:
         return slug, proj_dir
 
@@ -132,7 +197,7 @@ def _resolve_project_from_cwd(cwd: str, ledger_dir: Path) -> tuple[str | None, s
         )
         if result.returncode == 0:
             repo_root = result.stdout.strip()
-            slug, proj_dir = _resolve_project_from_path(repo_root + "/dummy", ledger_dir)
+            slug, proj_dir = _resolve_project_from_path(repo_root + "/dummy", ledger_dir, config)
             if slug:
                 return slug, proj_dir
     except (subprocess.TimeoutExpired, OSError):
@@ -368,7 +433,7 @@ def handle_touch(hook_data: dict[str, Any], ledger_dir: Path) -> None:
         return
 
     config = load_config(ledger_dir)
-    slug, directory = _resolve_project_from_path(file_path, ledger_dir)
+    slug, directory = _resolve_project_from_path(file_path, ledger_dir, config)
 
     # Auto-discover if not tracked yet
     if not slug:
@@ -389,7 +454,7 @@ def handle_commit(hook_data: dict[str, Any], ledger_dir: Path) -> None:
         return
 
     config = load_config(ledger_dir)
-    slug, directory = _resolve_project_from_cwd(cwd, ledger_dir)
+    slug, directory = _resolve_project_from_cwd(cwd, ledger_dir, config)
 
     # Auto-discover if not tracked yet
     if not slug and cwd:
@@ -480,7 +545,7 @@ def handle_stop_note(hook_data: dict[str, Any], ledger_dir: Path) -> None:
     config = load_config(ledger_dir)
     state = _get_session_state(session_id, config.state_dir)
     cwd = hook_data.get("cwd", "")
-    slug, directory = _resolve_project_from_cwd(cwd, ledger_dir)
+    slug, directory = _resolve_project_from_cwd(cwd, ledger_dir, config)
 
     if slug and slug in state.get("projects", {}):
         state["projects"][slug]["latest_stop_summary"] = summary
@@ -505,7 +570,7 @@ def handle_session_end(hook_data: dict[str, Any], ledger_dir: Path) -> None:
 
     if not projects:
         cwd = hook_data.get("cwd", "")
-        slug, directory = _resolve_project_from_cwd(cwd, ledger_dir)
+        slug, directory = _resolve_project_from_cwd(cwd, ledger_dir, config)
         if slug:
             ledger_path = ledger_dir / f"{slug}.md"
             if ledger_path.exists():

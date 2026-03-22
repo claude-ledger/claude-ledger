@@ -6,12 +6,14 @@ __all__ = [
     "DEFAULT_LEDGER_DIR",
     "CONFIG_FILENAME",
     "Config",
+    "SubProjectConfig",
     "WorkstreamConfig",
     "expand_path",
     "load_config",
     "generate_default_config",
 ]
 
+import fnmatch
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +31,18 @@ DEFAULT_SCAN_DIRS: list[str] = []
 
 # Directories inside scan_dirs to always skip
 DEFAULT_IGNORE_DIRS = ["node_modules", ".git", "__pycache__", ".next", "dist", "build"]
+
+
+@dataclass
+class SubProjectConfig:
+    """A sub-project that lives inside a parent repo directory."""
+
+    parent: str  # slug of the parent repo (must match a scan_dir project)
+    paths: list[str] = field(default_factory=list)  # glob patterns relative to parent dir
+
+    def matches(self, relative_path: str) -> bool:
+        """Check if a relative file path matches any of this sub-project's patterns."""
+        return any(fnmatch.fnmatch(relative_path, p) for p in self.paths)
 
 
 @dataclass
@@ -51,6 +65,7 @@ class Config:
     skip_slugs: list[str] = field(default_factory=list)
     no_track: list[str] = field(default_factory=list)
     ignore_dirs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_DIRS))
+    sub_projects: dict[str, SubProjectConfig] = field(default_factory=dict)
     workstreams: dict[str, WorkstreamConfig] = field(default_factory=dict)
 
     @property
@@ -89,6 +104,18 @@ class Config:
 def expand_path(p: str | Path) -> Path:
     """Expand ~ and environment variables in a path."""
     return Path(os.path.expandvars(os.path.expanduser(str(p))))
+
+
+def _parse_sub_projects(raw: dict[str, Any]) -> dict[str, SubProjectConfig]:
+    """Parse sub-project definitions from YAML."""
+    result = {}
+    for slug, sp_data in raw.items():
+        if isinstance(sp_data, dict):
+            result[slug] = SubProjectConfig(
+                parent=sp_data.get("parent", ""),
+                paths=sp_data.get("paths", []),
+            )
+    return result
 
 
 def _parse_workstreams(raw: dict[str, Any]) -> dict[str, WorkstreamConfig]:
@@ -141,7 +168,8 @@ def load_config(ledger_dir: Path | None = None) -> Config:
     if not isinstance(stale_days, int) or stale_days < 1:
         stale_days = 7
 
-    # Parse workstreams
+    # Parse sub_projects and workstreams
+    sub_projects = _parse_sub_projects(raw.get("sub_projects", {}))
     workstreams = _parse_workstreams(raw.get("workstreams", {}))
 
     return Config(
@@ -153,6 +181,7 @@ def load_config(ledger_dir: Path | None = None) -> Config:
         skip_slugs=raw.get("skip_slugs", []),
         no_track=raw.get("no_track", []),
         ignore_dirs=raw.get("ignore_dirs", list(DEFAULT_IGNORE_DIRS)),
+        sub_projects=sub_projects,
         workstreams=workstreams,
     )
 

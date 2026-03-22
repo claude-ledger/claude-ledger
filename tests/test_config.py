@@ -103,3 +103,40 @@ class TestGenerateDefaultConfig:
     def test_includes_github_user(self):
         result = generate_default_config(github_user="testuser")
         assert "testuser" in result
+
+
+class TestSubProjectConfig:
+    def test_parses_sub_projects(self, tmp_path):
+        config_content = """\
+version: 1
+scan_dirs: []
+sub_projects:
+  studio-manager:
+    parent: mouve-engine
+    paths:
+      - "docs/hr/*"
+      - "docs/projects/active/STUDIO-MANAGER*"
+  curriculum:
+    parent: mouve-engine
+    paths:
+      - "docs/curriculum/*"
+"""
+        (tmp_path / "ledger.yaml").write_text(config_content)
+        config = load_config(tmp_path)
+        assert "studio-manager" in config.sub_projects
+        assert "curriculum" in config.sub_projects
+        assert config.sub_projects["studio-manager"].parent == "mouve-engine"
+        assert len(config.sub_projects["studio-manager"].paths) == 2
+
+    def test_sub_project_matches_glob(self):
+        from claude_ledger.config import SubProjectConfig
+        sp = SubProjectConfig(parent="parent", paths=["docs/hr/*", "docs/projects/STUDIO*"])
+        assert sp.matches("docs/hr/jd.md") is True
+        assert sp.matches("docs/projects/STUDIO-MANAGER-PLAN.md") is True
+        assert sp.matches("src/main.py") is False
+
+    def test_empty_sub_projects(self, tmp_path):
+        config_content = "version: 1\nscan_dirs: []\n"
+        (tmp_path / "ledger.yaml").write_text(config_content)
+        config = load_config(tmp_path)
+        assert config.sub_projects == {}
