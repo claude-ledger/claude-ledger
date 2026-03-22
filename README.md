@@ -71,6 +71,20 @@ As you work, hooks fire silently in the background:
 
 You never interact with the ledger directly. It just accumulates.
 
+### New Projects Are Discovered Automatically
+
+When you start working on a project that hasn't been scanned yet, the hooks detect it. If the file you're editing is inside one of your configured `scan_dirs`, claude-ledger auto-creates a minimal ledger file on the spot — no re-scan needed.
+
+```
+You create ~/Code/new-project/ → start editing files →
+hook fires → "I don't know this project" →
+checks: inside a scan_dir? → yes →
+creates new-project.md (P3, active, discovered) →
+updates directory index → tracks from now on
+```
+
+The portfolio grows organically as you work. The initial `scan` + `bootstrap` gives you a snapshot of everything that exists today, but the ledger stays current without manual intervention.
+
 ## Quick Start
 
 ```bash
@@ -227,7 +241,7 @@ You can override any of these in the ledger files — they're just markdown.
 
 ## Requirements
 
-- Python >= 3.9
+- Python >= 3.10
 - Claude Code (for the hooks integration)
 - `gh` CLI (optional, for GitHub repo discovery)
 
