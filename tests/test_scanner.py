@@ -8,6 +8,8 @@ import pytest
 
 from claude_ledger.config import Config
 from claude_ledger.scanner import (
+    _extract_readme_title,
+    _is_boilerplate_line,
     extract_claude_md,
     extract_readme,
     scan_git_metadata,
@@ -52,6 +54,37 @@ class TestExtractClaudeMd:
         assert "progress" in result["status"].lower()
 
 
+class TestReadmeTitleExtraction:
+    def test_extracts_title(self):
+        lines = ["# My Project", "", "Description here."]
+        assert _extract_readme_title(lines) == "My Project"
+
+    def test_skips_badge_title(self):
+        lines = ["# [![badge](url)", "", "Content"]
+        assert _extract_readme_title(lines) is None
+
+    def test_no_title(self):
+        lines = ["Just some text", "no heading"]
+        assert _extract_readme_title(lines) is None
+
+
+class TestBoilerplateDetection:
+    def test_badge_is_boilerplate(self):
+        assert _is_boilerplate_line("[![npm](https://badge.com)]") is True
+
+    def test_code_block_is_boilerplate(self):
+        assert _is_boilerplate_line("```bash") is True
+
+    def test_yarn_dev_is_boilerplate(self):
+        assert _is_boilerplate_line("yarn dev") is True
+
+    def test_nextjs_scaffold_is_boilerplate(self):
+        assert _is_boilerplate_line("This is a [Next.js](https://nextjs.org) project") is True
+
+    def test_normal_text_is_not_boilerplate(self):
+        assert _is_boilerplate_line("A portfolio tracking tool for developers.") is False
+
+
 class TestExtractReadme:
     def test_no_readme(self, tmp_path):
         assert extract_readme(tmp_path) is None
@@ -64,6 +97,27 @@ class TestExtractReadme:
     def test_empty_readme(self, tmp_path):
         (tmp_path / "README.md").write_text("# Title\n")
         assert extract_readme(tmp_path) is None
+
+    def test_filters_badges(self, tmp_path):
+        (tmp_path / "README.md").write_text(
+            "# My Tool\n\n[![badge](https://img.shields.io/x)](url)\n\nActual description here.\n"
+        )
+        result = extract_readme(tmp_path)
+        assert result == "Actual description here."
+
+    def test_filters_code_blocks(self, tmp_path):
+        (tmp_path / "README.md").write_text(
+            "# Next App\n\n```bash\nnpm run dev\nyarn dev\npnpm dev\n```\n\nReal description.\n"
+        )
+        result = extract_readme(tmp_path)
+        assert result == "Real description."
+
+    def test_filters_nextjs_boilerplate(self, tmp_path):
+        (tmp_path / "README.md").write_text(
+            "# My App\n\nThis is a [Next.js](https://nextjs.org/) project bootstrapped with create-next-app.\n"
+        )
+        result = extract_readme(tmp_path)
+        assert result is None
 
 
 class TestScanTechStack:

@@ -55,51 +55,129 @@ def infer_priority(scan_data: dict[str, Any], status: str) -> str:
     return "P3"
 
 
+def _clean_text(text: str) -> str:
+    """Strip markdown formatting from text for clean display."""
+    # Remove bold/italic markers
+    text = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
+    # Remove links but keep text
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    # Remove badge images
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", "", text)
+    # Remove inline code
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text.strip()
+
+
+def _is_valid_name(text: str) -> bool:
+    """Check if text is suitable as a project display name."""
+    if not text or len(text) < 3 or len(text) > 60:
+        return False
+    # Reject markdown/code artifacts
+    if text.startswith(("[", "!", "`", "<", "```", "---", "yarn ", "npm ", "pnpm ")):
+        return False
+    # Reject if mostly non-alphanumeric
+    alpha_count = sum(1 for c in text if c.isalpha())
+    if alpha_count < len(text) * 0.4:
+        return False
+    return True
+
+
 def infer_name(scan_data: dict[str, Any]) -> str:
     """Infer a display name from available metadata.
 
-    Priority: README first line → CLAUDE.md 'What This Is' first sentence → slug titlecased.
+    Priority: README H1 title → CLAUDE.md first line → package.json description
+    → README description first sentence → slug titlecased.
     """
-    # Try README description — often the project title is the first heading
-    readme = scan_data.get("readme_description")
-    if readme:
-        # Take first sentence, max 60 chars
-        first_sentence = readme.split(".")[0].strip()
-        if 3 <= len(first_sentence) <= 60:
-            return first_sentence
+    # 1. Try README H1 title (most reliable — it's the project name)
+    readme_title = scan_data.get("readme_title")
+    if readme_title:
+        cleaned = _clean_text(readme_title)
+        if _is_valid_name(cleaned):
+            return cleaned
 
-    # Try CLAUDE.md "What This Is"
+    # 2. Try CLAUDE.md "What This Is" — first line, cleaned
     what_is = scan_data.get("claude_md_what_is_this")
     if what_is:
-        first_line = what_is.split("\n")[0].strip().rstrip(".")
-        if 3 <= len(first_line) <= 60:
+        first_line = _clean_text(what_is.split("\n")[0]).rstrip(".")
+        if _is_valid_name(first_line):
             return first_line
 
-    # Try package.json description
+    # 3. Try package.json description
     pkg_desc = scan_data.get("package_description")
-    if pkg_desc and 3 <= len(pkg_desc) <= 60:
-        return pkg_desc
+    if pkg_desc:
+        cleaned = _clean_text(pkg_desc)
+        if _is_valid_name(cleaned):
+            return cleaned
 
-    # Fall back to slug titlecased
+    # 4. Try README description — first sentence, cleaned
+    readme = scan_data.get("readme_description")
+    if readme:
+        first_sentence = _clean_text(readme.split(".")[0]).strip()
+        if _is_valid_name(first_sentence):
+            return first_sentence
+
+    # 5. Fall back to slug titlecased
     slug = scan_data.get("slug", "unknown")
     return slug.replace("-", " ").replace("_", " ").title()
 
 
 def infer_vision(scan_data: dict[str, Any]) -> str:
-    """Infer a one-line project vision from available metadata."""
-    what_is = scan_data.get("claude_md_what_is_this")
-    if what_is:
-        return what_is.split("\n")[0].strip()[:200]
+    """Infer a one-line project vision from available metadata.
 
-    readme = scan_data.get("readme_description")
-    if readme:
-        return readme[:200]
+    Strips markdown formatting and truncates at sentence boundary.
+    """
+    candidates = [
+        scan_data.get("claude_md_what_is_this"),
+        scan_data.get("readme_description"),
+        scan_data.get("package_description"),
+    ]
 
-    pkg_desc = scan_data.get("package_description")
-    if pkg_desc:
-        return pkg_desc[:200]
+    for raw in candidates:
+        if not raw:
+            continue
+        # Take first line, clean markdown
+        first_line = _clean_text(raw.split("\n")[0]).strip()
+        if not first_line or len(first_line) < 5:
+            continue
+        # Truncate at sentence boundary if too long
+        if len(first_line) > 150:
+            # Find last sentence end before 150 chars
+            for end in (". ", "! ", "? "):
+                idx = first_line[:150].rfind(end)
+                if idx > 30:
+                    return first_line[: idx + 1]
+            # No sentence boundary — truncate at word boundary
+            return first_line[:147].rsplit(" ", 1)[0] + "..."
+        return first_line
 
     return ""
+
+
+def infer_phase(scan_data: dict[str, Any], status: str) -> str:
+    """Infer current phase from activity patterns and status.
+
+    - active with commits in last 7 days → building
+    - active with older commits → maintained
+    - paused/dormant → paused
+    - completed → shipped
+    - archived → archived
+    """
+    if status == "completed":
+        return "shipped"
+    if status in ("paused", "dormant"):
+        return "paused"
+    if status == "archived":
+        return "archived"
+
+    # Active — check recency
+    age = days_since(scan_data.get("last_commit_date"))
+    commits_30d = scan_data.get("commit_count_30d", 0)
+
+    if commits_30d >= 5 and age <= 7:
+        return "building"
+    if commits_30d >= 1:
+        return "maintained"
+    return "unknown"
 
 
 def get_workstreams_for_slug(slug: str, config: Config) -> list[str]:
@@ -159,6 +237,10 @@ def create_ledger_file(
     if slug in config.no_track:
         return None, "skipped (in no_track)"
 
+    # Skip third-party clones (not the user's own repo)
+    if scan_data.get("is_third_party"):
+        return None, "skipped (third-party clone)"
+
     # Idempotent: don't overwrite existing ledger files
     ledger_path = config.ledger_dir / f"{slug}.md"
     if ledger_path.exists():
@@ -169,6 +251,7 @@ def create_ledger_file(
     priority = infer_priority(scan_data, status)
     name = infer_name(scan_data)
     vision = infer_vision(scan_data)
+    phase = infer_phase(scan_data, status)
     workstreams = get_workstreams_for_slug(slug, config)
 
     # Build frontmatter
@@ -180,7 +263,7 @@ def create_ledger_file(
         "status": status,
         "priority": priority,
         "vision": vision,
-        "current_phase": "unknown",
+        "current_phase": phase,
         "last_session": scan_data.get("last_commit_date"),
         "last_activity": scan_data.get("last_commit_subject", ""),
         "systems": scan_data.get("external_systems", []),
@@ -241,19 +324,23 @@ def bootstrap_from_scan(
 
         try:
             if dry_run:
-                status = infer_status(entry)
-                priority = infer_priority(entry, status)
-                name = infer_name(entry)
                 slug = entry.get("slug", "?")
 
                 if slug in config.skip_slugs or slug in config.no_track:
-                    log(f"  - {slug}: would skip")
+                    log(f"  - {slug}: would skip (config)")
+                    skipped += 1
+                elif entry.get("is_third_party"):
+                    log(f"  - {slug}: would skip (third-party)")
                     skipped += 1
                 elif (config.ledger_dir / f"{slug}.md").exists():
                     log(f"  - {slug}: already exists")
                     skipped += 1
                 else:
-                    log(f"  + {slug}: {name} ({priority}, {status})")
+                    status = infer_status(entry)
+                    priority = infer_priority(entry, status)
+                    name = infer_name(entry)
+                    phase = infer_phase(entry, status)
+                    log(f"  + {slug}: {name} ({priority}, {status}, {phase})")
                     created += 1
             else:
                 result, reason = create_ledger_file(entry, config)

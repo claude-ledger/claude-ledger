@@ -130,8 +130,54 @@ def extract_claude_md(project_dir: Path) -> dict[str, Any]:
     return {"has_claude_md": True, "what_is_this": what_is_this, "status": status}
 
 
+def _extract_readme_title(lines: list[str]) -> str | None:
+    """Extract the H1 title from README lines."""
+    for line in lines:
+        if line.startswith("# "):
+            title = line[2:].strip()
+            # Skip if it's just the slug repeated or a badge
+            if title and not title.startswith("[") and not title.startswith("!"):
+                return title
+    return None
+
+
+def _is_boilerplate_line(line: str) -> bool:
+    """Check if a README line is boilerplate/non-descriptive."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    # Markdown badges
+    if stripped.startswith("[![") or stripped.startswith("!["):
+        return True
+    # HTML tags
+    if stripped.startswith("<") and not stripped.startswith("<http"):
+        return True
+    # Code blocks
+    if stripped.startswith("```") or stripped.startswith("~~~"):
+        return True
+    # Bullet points with commands
+    if stripped.startswith("- ") or stripped.startswith("* "):
+        inner = stripped[2:].strip()
+        if inner.startswith("`") or inner.startswith("npm ") or inner.startswith("yarn "):
+            return True
+    # Common boilerplate phrases
+    boilerplate = [
+        "getting started", "quick start", "installation", "usage",
+        "yarn dev", "npm run", "pnpm dev", "bun dev", "npx ",
+        "this is a [next.js]", "bootstrapped with",
+    ]
+    lower = stripped.lower()
+    if any(lower.startswith(phrase) for phrase in boilerplate):
+        return True
+    return False
+
+
 def extract_readme(project_dir: Path) -> str | None:
-    """Extract description from README.md — first paragraph after the title."""
+    """Extract description from README.md.
+
+    Returns the first meaningful paragraph after the title, filtering out
+    badges, code blocks, boilerplate, and HTML tags.
+    """
     readme_path = project_dir / "README.md"
     if not readme_path.exists():
         return None
@@ -141,10 +187,20 @@ def extract_readme(project_dir: Path) -> str | None:
         lines = content.split("\n")
         desc_lines: list[str] = []
         past_title = False
+        in_code_block = False
+
         for line in lines:
+            # Track code blocks
+            if line.strip().startswith("```") or line.strip().startswith("~~~"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+
             if line.startswith("# "):
                 past_title = True
                 continue
+
             if past_title:
                 if line.strip() == "":
                     if desc_lines:
@@ -152,7 +208,12 @@ def extract_readme(project_dir: Path) -> str | None:
                     continue
                 if line.startswith("#"):
                     break
+                if _is_boilerplate_line(line):
+                    if desc_lines:
+                        break
+                    continue
                 desc_lines.append(line.strip())
+
         return " ".join(desc_lines)[:500] if desc_lines else None
     except OSError:
         return None
@@ -236,6 +297,16 @@ def scan_local_directory(project_dir: Path, github_user: str | None = None) -> d
     tech_stack, pkg_desc, has_pkg = scan_tech_stack(project_dir)
     structure = scan_structure(project_dir)
 
+    # Extract README title separately from description
+    readme_title = None
+    readme_path = project_dir / "README.md"
+    if readme_path.exists():
+        try:
+            readme_lines = readme_path.read_text(encoding="utf-8", errors="replace").split("\n")
+            readme_title = _extract_readme_title(readme_lines)
+        except OSError:
+            pass
+
     remote_url = git_meta.get("remote_url")
     third_party = bool(remote_url and github_user and github_user not in remote_url)
 
@@ -265,6 +336,7 @@ def scan_local_directory(project_dir: Path, github_user: str | None = None) -> d
         "has_claude_md": claude_md["has_claude_md"],
         "claude_md_what_is_this": claude_md["what_is_this"],
         "claude_md_status": claude_md["status"],
+        "readme_title": readme_title,
         "readme_description": readme_desc,
         "package_description": pkg_desc,
         "tech_stack": tech_stack,
