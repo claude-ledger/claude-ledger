@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Portfolio-level project tracking for Claude Code"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     { name = "Rob Leach" },
 ]

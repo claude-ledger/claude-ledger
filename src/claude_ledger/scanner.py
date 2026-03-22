@@ -2,6 +2,19 @@
 
 from __future__ import annotations
 
+__all__ = [
+    "ScanResults",
+    "scan_git_metadata",
+    "extract_claude_md",
+    "extract_readme",
+    "scan_tech_stack",
+    "scan_structure",
+    "scan_local_directory",
+    "scan_github_repos",
+    "scan_portfolio",
+    "save_scan_results",
+]
+
 import json
 import os
 import re

@@ -14,6 +14,14 @@ Reads hook JSON from stdin.
 
 from __future__ import annotations
 
+__all__ = [
+    "handle_touch",
+    "handle_commit",
+    "handle_stop_note",
+    "handle_session_end",
+    "rebuild_directory_index",
+]
+
 import json
 import os
 import re
@@ -506,7 +514,12 @@ def rebuild_directory_index(ledger_dir: Path) -> None:
 
 
 def main() -> None:
-    """Entry point for hook invocation."""
+    """Legacy entry point for hook invocation.
+
+    Prefer the CLI subcommand: ``claude-ledger capture --touch|--commit|...``
+    This is kept for backwards compatibility with hooks that call
+    ``python -m claude_ledger.capture --touch`` directly.
+    """
     hook_data = _read_stdin()
 
     if len(sys.argv) < 2:
@@ -516,14 +529,16 @@ def main() -> None:
     mode = sys.argv[1]
     ledger_dir = _get_ledger_dir()
 
-    if mode == "--touch":
-        handle_touch(hook_data, ledger_dir)
-    elif mode == "--commit":
-        handle_commit(hook_data, ledger_dir)
-    elif mode == "--stop-note":
-        handle_stop_note(hook_data, ledger_dir)
-    elif mode == "--session-end":
-        handle_session_end(hook_data, ledger_dir)
+    handlers = {
+        "--touch": handle_touch,
+        "--commit": handle_commit,
+        "--stop-note": handle_stop_note,
+        "--session-end": handle_session_end,
+    }
+
+    handler = handlers.get(mode)
+    if handler:
+        handler(hook_data, ledger_dir)
     else:
         print(f"Unknown mode: {mode}")
         sys.exit(1)

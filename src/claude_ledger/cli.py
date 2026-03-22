@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+__all__ = ["cli"]
+
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -51,8 +55,6 @@ def _resolve_cli_path() -> str:
     Falls back to 'claude-ledger' (bare name) only if it's on PATH.
     Returns the absolute path to use in hook commands.
     """
-    import shutil
-
     # 1. Check if 'claude-ledger' is on PATH
     on_path = shutil.which("claude-ledger")
     if on_path:
@@ -196,7 +198,8 @@ def _merge_hooks(settings_path: Path, hooks_spec: dict) -> list[str]:
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp_path, "w") as f:
             json.dump(settings, f, indent=2)
-        import os
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(str(tmp_path), str(settings_path))
     except Exception as e:
         click.echo(f"  ERROR writing settings: {e}")
@@ -245,11 +248,12 @@ def _remove_hooks(settings_path: Path) -> list[str]:
 
     settings["hooks"] = hooks
 
-    import os
     tmp_path = settings_path.parent / f".{settings_path.name}.tmp"
     try:
         with open(tmp_path, "w") as f:
             json.dump(settings, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(str(tmp_path), str(settings_path))
     except Exception as e:
         click.echo(f"  ERROR writing settings: {e}")
@@ -519,7 +523,6 @@ def uninstall(ctx: click.Context, delete: bool) -> None:
 
     if delete:
         config = _load_config(ctx)
-        import shutil
         if config.ledger_dir.exists():
             if click.confirm(f"Delete {config.ledger_dir} and all ledger files?"):
                 shutil.rmtree(config.ledger_dir)
