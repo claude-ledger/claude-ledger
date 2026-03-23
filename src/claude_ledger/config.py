@@ -63,6 +63,7 @@ class Config:
     stray_scan_dirs: list[Path] = field(default_factory=list)
     stale_days: int = 7
     skip_slugs: list[str] = field(default_factory=list)
+    force_track: list[str] = field(default_factory=list)
     no_track: list[str] = field(default_factory=list)
     ignore_dirs: list[str] = field(default_factory=lambda: list(DEFAULT_IGNORE_DIRS))
     sub_projects: dict[str, SubProjectConfig] = field(default_factory=dict)
@@ -179,6 +180,7 @@ def load_config(ledger_dir: Path | None = None) -> Config:
         stray_scan_dirs=stray_scan_dirs,
         stale_days=stale_days,
         skip_slugs=raw.get("skip_slugs", []),
+        force_track=raw.get("force_track", []),
         no_track=raw.get("no_track", []),
         ignore_dirs=raw.get("ignore_dirs", list(DEFAULT_IGNORE_DIRS)),
         sub_projects=sub_projects,

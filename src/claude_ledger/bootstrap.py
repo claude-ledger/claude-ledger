@@ -252,8 +252,8 @@ def create_ledger_file(
     if slug in config.no_track:
         return None, "skipped (in no_track)"
 
-    # Skip third-party clones (not the user's own repo)
-    if scan_data.get("is_third_party"):
+    # Skip third-party clones (not the user's own repo) unless force-tracked
+    if scan_data.get("is_third_party") and slug not in config.force_track:
         return None, "skipped (third-party clone)"
 
     # Idempotent: don't overwrite existing ledger files
@@ -341,7 +341,7 @@ def bootstrap_from_scan(
                 if slug in config.skip_slugs or slug in config.no_track:
                     log(f"  - {slug}: would skip (config)")
                     skipped += 1
-                elif entry.get("is_third_party"):
+                elif entry.get("is_third_party") and slug not in config.force_track:
                     log(f"  - {slug}: would skip (third-party)")
                     skipped += 1
                 elif (config.ledger_dir / f"{slug}.md").exists():
