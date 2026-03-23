@@ -410,4 +410,57 @@ def bootstrap_from_scan(
             log(f"  ! {slug}: ERROR — {e}")
             errors += 1
 
+    # Process configured sub-projects
+    if config.sub_projects:
+        log("\nBootstrapping sub-projects...")
+        for slug, sp in config.sub_projects.items():
+            try:
+                ledger_path = (config.ledger_dir / f"{slug}.md").resolve()
+                if not str(ledger_path).startswith(str(config.ledger_dir.resolve())):
+                    log(f"  - {slug}: skipped (path traversal)")
+                    skipped += 1
+                    continue
+
+                if ledger_path.exists():
+                    log(f"  - {slug}: already exists")
+                    skipped += 1
+                    continue
+
+                if dry_run:
+                    log(f"  + {slug}: (sub-project of {sp.parent})")
+                    created += 1
+                    continue
+
+                # Find parent directory to set as the sub-project directory too
+                parent_entry = next(
+                    (e for e in scan_data.get("projects", [])
+                     if e.get("slug") == sp.parent),
+                    None,
+                )
+                parent_dir = parent_entry.get("local_directory", "") if parent_entry else ""
+
+                display_name = slug.replace("-", " ").replace("_", " ").title()
+                post = frontmatter.Post("## Activity Log\n")
+                post.metadata = {
+                    "name": display_name,
+                    "slug": slug,
+                    "directory": parent_dir,
+                    "repo_url": None,
+                    "status": "active",
+                    "priority": "P2",
+                    "vision": f"Sub-project of {sp.parent}",
+                    "current_phase": "discovered",
+                    "last_session": None,
+                    "last_activity": f"Created by bootstrap (sub-project of {sp.parent})",
+                    "systems": [],
+                    "tags": [],
+                    "workstreams": [],
+                }
+                atomic_write_frontmatter(ledger_path, post)
+                log(f"  + {slug} (sub-project of {sp.parent})")
+                created += 1
+            except Exception as e:
+                log(f"  ! {slug}: ERROR — {e}")
+                errors += 1
+
     return {"created": created, "skipped": skipped, "errors": errors}
